@@ -1,0 +1,90 @@
+name: Deploy
+
+on:
+  # Manual trigger from GitHub Actions UI (Actions tab → Deploy → Run workflow)
+  workflow_dispatch:
+
+# Prevent concurrent deploys
+concurrency:
+  group: deploy
+  cancel-in-progress: false
+
+jobs:
+  build-and-push:
+    name: Build & Push Image
+    runs-on: ubuntu-latest
+
+    permissions:
+      contents: read
+      packages: write
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Log in to GitHub Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Extract Docker metadata
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ghcr.io/${{ github.repository }}
+          tags: |
+            type=sha,prefix=sha-
+            type=raw,value=latest
+
+      - name: Build and push
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+
+  deploy:
+    name: Deploy to Server
+    runs-on: ubuntu-latest
+    needs: build-and-push
+    # Only runs when DEPLOY_ENABLED repository variable is set to 'true'
+    # Set it in: Settings → Variables → Actions → New repository variable
+    if: vars.DEPLOY_ENABLED == 'true'
+
+    steps:
+      - name: Deploy via SSH
+        uses: appleboy/ssh-action@v1
+        with:
+          host: ${{ secrets.DEPLOY_HOST }}
+          username: ${{ secrets.DEPLOY_USER }}
+          key: ${{ secrets.DEPLOY_SSH_KEY }}
+          port: ${{ secrets.DEPLOY_PORT }}
+          script: |
+            set -e
+
+            echo "==> Logging into GHCR..."
+            echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u ${{ github.actor }} --password-stdin
+
+            echo "==> Pulling latest image..."
+            docker pull ghcr.io/${{ github.repository }}:latest
+
+            echo "==> Restarting container..."
+            cd /opt/trading-bot
+            docker compose up -d --force-recreate
+
+            echo "==> Waiting for healthcheck (up to 90s)..."
+            for i in $(seq 1 9); do
+              sleep 10
+              STATUS=$(docker inspect --format='{{.State.Health.Status}}' trading-bot 2>/dev/null || echo "missing")
+              echo "  [${i}0s] status=${STATUS}"
+              if [ "$STATUS" = "healthy" ]; then
+                echo "==> Deploy complete."
+                exit 0
+              fi
+            done
+            echo "ERROR: Container did not become healthy within 90s"
+            docker logs --tail 30 trading-bot
+            exit 1

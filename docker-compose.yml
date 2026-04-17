@@ -1,0 +1,39 @@
+services:
+  trading-bot:
+    # build: is used when running locally with --build flag.
+    # image: tags the built result AND is used for production pulls from registry.
+    build: .
+    image: ghcr.io/YOUR_USERNAME/trading-bot-standalone:latest
+    container_name: trading-bot
+    restart: unless-stopped
+
+    ports:
+      - "8080:8080"
+
+    env_file:
+      - .env
+
+    # Persistent runtime data — all files live in ./data/ on the host.
+    # Run `mkdir -p ./data ./cache` before first start.
+    volumes:
+      - ./data/autoresearch.db:/app/autoresearch.db
+      - ./data/trade_log.csv:/app/trade_log.csv
+      - ./data/trading_bot.log:/app/trading_bot.log
+      - ./data/autoresearch_results.csv:/app/autoresearch_results.csv
+      - ./data/autoresearch_alltime.csv:/app/autoresearch_alltime.csv
+      - ./data/autoresearch_meta.json:/app/autoresearch_meta.json
+      - ./data/signal_state.json:/app/signal_state.json
+      - ./cache:/app/cache
+
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8080/api/status"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 20s
+
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "5"

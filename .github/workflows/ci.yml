@@ -1,0 +1,85 @@
+name: CI
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+    branches: ["**"]
+  # Manual trigger from GitHub Actions UI
+  workflow_dispatch:
+
+jobs:
+  test:
+    name: Unit Tests
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: pip install --no-cache-dir -r requirements.txt
+
+      - name: Generate Prisma client
+        run: prisma generate
+
+      - name: Run pytest
+        run: |
+          pytest tests/ \
+            --cov=bot \
+            --cov=api \
+            --cov-report=term-missing \
+            --cov-report=xml \
+            --cov-fail-under=35 \
+            -v
+
+      - name: Upload coverage reports
+        uses: codecov/codecov-action@v4
+        if: always()
+        with:
+          file: ./coverage.xml
+          flags: unittests
+          fail_ci_if_error: false
+        env:
+          CODECOV_TOKEN: ${{ secrets.CODECOV_TOKEN }}
+
+  lint:
+    name: Lint
+    runs-on: ubuntu-latest
+    needs: test
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: pip install --no-cache-dir -r requirements.txt flake8
+
+      - name: Lint — flake8
+        run: |
+          flake8 bot/ api/ main.py autoresearch.py backtest.py \
+            --max-line-length=120 \
+            --ignore=E501,W503,E402,F401,F403,F405,F541,F841,E741,E127,E126,E241,E302,E202,E226,W293,W291,W504 \
+            --exclude=__pycache__
+
+  docker-build:
+    name: Docker Build Check
+    runs-on: ubuntu-latest
+    needs: lint
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Build Docker image (smoke test)
+        run: docker build -t trading-bot:ci-check .

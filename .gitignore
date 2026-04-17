@@ -1,0 +1,57 @@
+# API keys and secrets
+.env
+
+# Runtime logs
+trading_bot.log
+trade_log.csv
+
+# Backtest output
+backtest_trades.csv
+autoresearch_results.csv
+autoresearch_alltime.csv
+autoresearch_meta.json
+cache/
+
+# SQLite database (runtime data — lives in ./data/ when using Docker)
+autoresearch.db
+data/
+
+# Backups
+*.bak
+
+# Debug / temp scripts
+debug_*.py
+seed_alltime.py
+
+# Python cache
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+
+# Virtual environment
+venv/
+.venv/
+env/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+Thumbs.db
+Desktop.ini
+.DS_Store
+
+# Additional runtime / test artifacts
+.coverage
+.pytest_cache/
+htmlcov/
+signal_state.json
+autoresearch_walkforward.csv
+backtest_*.csv
+
+# Claude Code internals (development tooling)
+.claude/

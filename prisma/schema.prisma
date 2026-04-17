@@ -1,0 +1,92 @@
+datasource db {
+  provider = "sqlite"
+  // DATABASE_URL is set by docker-entrypoint.sh (absolute path) and .env (relative path for local dev)
+  url      = env("DATABASE_URL")
+}
+
+generator client {
+  provider             = "prisma-client-py"
+  interface            = "asyncio"
+  recursive_type_depth = 5
+}
+
+model AutoResearchRun {
+  id                String   @id @default(uuid())
+  startedAt         DateTime @default(now())
+  completedAt       DateTime?
+  totalCombinations Int
+  assetsCount       Int
+  assets            String
+  status            String   @default("running")
+  durationSeconds   Int?
+  
+  results AutoResearchResult[]
+  
+  @@map("autoresearch_runs")
+}
+
+model AutoResearchResult {
+  id                Int      @id @default(autoincrement())
+  runId             String
+  run               AutoResearchRun @relation(fields: [runId], references: [id], onDelete: Cascade)
+  
+  lookbackWindow    Int
+  regressionLevel   Int
+  useKernelSmoothing Boolean
+  relativeWeight    Float
+  lag               Int
+  atrPeriod         Int
+  atrMultiplier     Float
+  volatilityMin     Int
+  volatilityMax     Int
+  reentryDelay      Int
+  
+  score             Float
+  
+  ethTrades         Int?
+  ethProfitFactor   Float?
+  ethMaxDrawdown    Float?
+  ethProfit         Float?
+  
+  btcTrades         Int?
+  btcProfitFactor   Float?
+  btcMaxDrawdown    Float?
+  btcProfit         Float?
+  
+  solTrades         Int?
+  solProfitFactor   Float?
+  solMaxDrawdown    Float?
+  solProfit         Float?
+  
+  avaxTrades        Int?
+  avaxProfitFactor  Float?
+  avaxMaxDrawdown   Float?
+  avaxProfit        Float?
+  
+  bnbTrades         Int?
+  bnbProfitFactor   Float?
+  bnbMaxDrawdown    Float?
+  bnbProfit         Float?
+  
+  adaTrades         Int?
+  adaProfitFactor   Float?
+  adaMaxDrawdown    Float?
+  adaProfit         Float?
+  
+  dogeTrades        Int?
+  dogeProfitFactor  Float?
+  dogeMaxDrawdown   Float?
+  dogeProfit        Float?
+  
+  maticTrades       Int?
+  maticProfitFactor Float?
+  maticMaxDrawdown  Float?
+  maticProfit       Float?
+  
+  createdAt         DateTime @default(now())
+  
+  @@map("autoresearch_results")
+  @@index([runId])
+  @@index([score])
+  @@index([lookbackWindow, regressionLevel, useKernelSmoothing])
+}

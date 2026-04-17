@@ -1,0 +1,1753 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Trading Bot Dashboard</title>
+    <script src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
+    <script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
+    <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <style>
+        .toast { animation: fadeIn 0.3s ease-in; }
+        @keyframes fadeIn { from { opacity: 0; transform: translateY(-10px); } to { opacity: 1; transform: translateY(0); } }
+    </style>
+</head>
+<body class="bg-gray-900 text-gray-100 min-h-screen">
+<div id="root"></div>
+<script type="text/babel">
+const { useState, useEffect, useRef, useCallback } = React;
+
+// ─── API helpers ────────────────────────────────────────────────
+const api = {
+    get: async (url) => { const r = await fetch(url); return r.json(); },
+    post: async (url, body) => {
+        const r = await fetch(url, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json', 'x-upload-key': 'dev-placeholder-key' },
+            body: body ? JSON.stringify(body) : undefined
+        });
+        if (!r.ok) { const e = await r.json(); throw new Error(e.detail || 'Error'); }
+        return r.json();
+    },
+    patch: async (url, body) => {
+        const r = await fetch(url, {
+            method: 'PATCH',
+            headers: { 'Content-Type': 'application/json', 'x-upload-key': 'dev-placeholder-key' },
+            body: body ? JSON.stringify(body) : undefined
+        });
+        if (!r.ok) { const e = await r.json(); throw new Error(e.detail || 'Error'); }
+        return r.json();
+    },
+    delete: async (url) => {
+        const r = await fetch(url, {
+            method: 'DELETE',
+            headers: { 'x-upload-key': 'dev-placeholder-key' }
+        });
+        if (!r.ok) { const e = await r.json(); throw new Error(e.detail || 'Error'); }
+        return r.json();
+    },
+};
+
+// ─── Toast ──────────────────────────────────────────────────────
+function Toast({ message, type, onClose }) {
+    useEffect(() => { const t = setTimeout(onClose, 4000); return () => clearTimeout(t); }, []);
+    const bg = type === 'error' ? 'bg-red-600' : 'bg-green-600';
+    return <div className={`toast fixed top-4 right-4 ${bg} text-white px-4 py-2 rounded shadow-lg z-50`}>{message}</div>;
+}
+
+// ─── Card ───────────────────────────────────────────────────────
+function Card({ title, children, className = '' }) {
+    return (
+        <div className={`bg-gray-800 rounded-lg p-4 ${className}`}>
+            <h3 className="text-xs font-semibold text-gray-400 uppercase tracking-wider mb-3">{title}</h3>
+            {children}
+        </div>
+    );
+}
+
+function Stat({ label, value, color = 'text-white' }) {
+    return <div className="mb-1"><span className="text-gray-400 text-sm">{label}: </span><span className={`font-mono ${color}`}>{value}</span></div>;
+}
+
+// ─── Equity Chart (pure SVG) ─────────────────────────────────────
+function EquityChart({ data }) {
+    if (!data || data.length < 2) return null;
+    const W = 800, H = 180, PAD = 40;
+    const vals = data.map(d => d.balance);
+    const minV = Math.min(...vals), maxV = Math.max(...vals);
+    const range = maxV - minV || 1;
+
+    const points = vals.map((v, i) => {
+        const x = PAD + (i / (vals.length - 1)) * (W - PAD * 2);
+        const y = H - PAD - ((v - minV) / range) * (H - PAD * 2);
+        return `${x},${y}`;
+    }).join(' ');
+
+    // Y-axis labels
+    const yLabels = [minV, minV + range/2, maxV].map(v => ({
+        v, y: H - PAD - ((v - minV) / range) * (H - PAD * 2)
+    }));
+
+    return (
+        <svg viewBox={`0 0 ${W} ${H}`} className="w-full" style={{maxHeight: '200px'}}>
+            {/* Grid lines */}
+            {yLabels.map((l, i) => (
+                <line key={i} x1={PAD} y1={l.y} x2={W-PAD} y2={l.y} stroke="#374151" strokeWidth="1" />
+            ))}
+            {/* Y labels */}
+            {yLabels.map((l, i) => (
+                <text key={`t${i}`} x={PAD-4} y={l.y+4} textAnchor="end" fill="#9ca3af" fontSize="11" fontFamily="monospace">
+                    {l.v.toFixed(0)}
+                </text>
+            ))}
+            {/* Line */}
+            <polyline points={points} fill="none" stroke="#3b82f6" strokeWidth="2" strokeLinejoin="round" />
+            {/* Last point dot */}
+            {vals.length > 0 && (() => {
+                const lx = PAD + ((vals.length-1) / (vals.length - 1)) * (W - PAD * 2);
+                const ly = H - PAD - ((vals[vals.length-1] - minV) / range) * (H - PAD * 2);
+                return <circle cx={lx} cy={ly} r="3" fill="#3b82f6" />;
+            })()}
+        </svg>
+    );
+}
+
+// ─── Dashboard Tab ──────────────────────────────────────────────
+function DashboardTab({ status, trades, equity }) {
+    const pos = status.position || 'flat';
+    const sig = status.last_signal || {};
+    const isBull = sig.is_bullish;
+    const nextMin = status.next_candle ? Math.max(0, Math.round((status.next_candle - Date.now()/1000) / 60)) : '?';
+    const hasPnl = pos !== 'flat' && status.unrealized_pnl != null;
+    const pnlColor = !hasPnl ? 'text-gray-400' : status.unrealized_pnl > 0 ? 'text-green-400' : status.unrealized_pnl < 0 ? 'text-red-400' : 'text-gray-300';
+    const pnlText = hasPnl ? `${status.unrealized_pnl > 0 ? '+' : ''}${Number(status.unrealized_pnl).toFixed(2)}%` : '-';
+
+    return (
+        <div className="space-y-4">
+            <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+                <Card title="Status">
+                    <Stat label="Bot" value={status.bot_running ? 'Running' : 'Stopped'}
+                          color={status.bot_running ? 'text-green-400' : 'text-red-400'} />
+                    <Stat label="Paused" value={status.trading_paused ? 'YES' : 'No'}
+                          color={status.trading_paused ? 'text-yellow-400' : 'text-gray-300'} />
+                    <Stat label="Next candle" value={`~${nextMin}m`} />
+                    <Stat label="Balance" value={`${Number(status.balance).toFixed(2)} USDT`} />
+                </Card>
+                <Card title="Position">
+                    <Stat label="Side" value={pos.toUpperCase()}
+                          color={pos === 'long' ? 'text-green-400' : pos === 'short' ? 'text-red-400' : 'text-gray-400'} />
+                    <Stat label="Entry" value={status.entry_price ? Number(status.entry_price).toFixed(2) : '-'} />
+                    <Stat label="Current" value={status.current_price ? `${Number(status.current_price).toFixed(2)} USDT` : '-'} />
+                    <Stat label="Stop Loss" value={status.stop_loss ? Number(status.stop_loss).toFixed(2) : '-'} />
+                    <Stat label="Size" value={status.position_size ? `${status.position_size} ETH` : '-'} />
+                    <Stat label="PnL" value={pnlText} color={pnlColor} />
+                </Card>
+                <Card title="Kill Switch">
+                    <Stat label="Active" value={status.kill_switch_paused ? 'YES' : 'No'}
+                          color={status.kill_switch_paused ? 'text-red-400' : 'text-green-400'} />
+                    <Stat label="Peak equity" value={`${Number(status.peak_equity).toFixed(2)} USDT`} />
+                </Card>
+            </div>
+
+            <Card title="Last Signal">
+                <div className="grid grid-cols-2 md:grid-cols-5 gap-2 text-sm font-mono">
+                    <div>yhat1: <span className="text-blue-300">{sig.yhat1 != null ? Number(sig.yhat1).toFixed(2) : '-'}</span></div>
+                    <div>yhat2: <span className="text-purple-300">{sig.yhat2 != null ? Number(sig.yhat2).toFixed(2) : '-'}</span></div>
+                    <div>Direction: <span className={isBull ? 'text-green-400' : 'text-red-400'}>{isBull ? 'BULLISH' : 'BEARISH'}</span></div>
+                    <div>Vol filter: <span className={sig.vol_passes ? 'text-green-400' : 'text-yellow-400'}>{sig.vol_passes ? 'PASS' : 'BLOCK'}</span></div>
+                    <div>Change: <span className="text-gray-300">{sig.bullish_change ? 'bullish' : sig.bearish_change ? 'bearish' : 'none'}</span></div>
+                </div>
+            </Card>
+
+            {equity.length > 1 && (
+                <Card title="Equity Curve">
+                    <EquityChart data={equity} />
+                </Card>
+            )}
+
+            <Card title="Recent Trades">
+                <div className="overflow-x-auto">
+                    <table className="w-full text-sm font-mono">
+                        <thead><tr className="text-gray-400 border-b border-gray-700">
+                            <th className="text-left py-1">Time</th>
+                            <th className="text-left">Action</th>
+                            <th className="text-right">Price</th>
+                            <th className="text-right">PnL</th>
+                            <th className="text-left">Reason</th>
+                        </tr></thead>
+                        <tbody>
+                        {trades.map((t, i) => {
+                            const pnl = t.pnl_pct ? Number(t.pnl_pct) : null;
+                            const label = (() => {
+                                const a = t.action || '';
+                                const r = t.exit_reason || t.trade_type || '';
+                                if (a.startsWith('open_') && r === 're_entry') return '\u{1F504} Re-entry';
+                                if (a.startsWith('open_')) return '\u{1F4C8} Signal';
+                                if (a.startsWith('close_') && r === 'stop_loss') return '\u{1F6D1} Stop Loss';
+                                if (a.startsWith('close_') && r === 'color_change') return '\u{1F3AF} Take Profit';
+                                return r || a;
+                            })();
+                            return (
+                                <tr key={i} className="border-b border-gray-700/50">
+                                    <td className="py-1 text-gray-400">{(t.timestamp || '').replace('T', ' ').slice(0, 19)}</td>
+                                    <td className={t.action?.includes('long') ? 'text-green-400' : 'text-red-400'}>{t.action}</td>
+                                    <td className="text-right">{t.fill_price || t.exit_price || t.entry_price || '-'}</td>
+                                    <td className={`text-right ${pnl > 0 ? 'text-green-400' : pnl < 0 ? 'text-red-400' : ''}`}>
+                                        {pnl != null ? `${pnl > 0 ? '+' : ''}${pnl.toFixed(2)}%` : '-'}
+                                    </td>
+                                    <td className="text-gray-400">{label}</td>
+                                </tr>
+                            );
+                        })}
+                        {trades.length === 0 && <tr><td colSpan="5" className="py-4 text-center text-gray-500">No trades yet</td></tr>}
+                        </tbody>
+                    </table>
+                </div>
+            </Card>
+        </div>
+    );
+}
+
+// ─── Settings Tab ───────────────────────────────────────────────
+function SettingsTab({ onToast }) {
+    const [settings, setSettings] = useState(null);
+    const [form, setForm] = useState({});
+
+    useEffect(() => {
+        api.get('/api/settings').then(s => {
+            setSettings(s);
+            setForm(flatten(s));
+        });
+    }, []);
+
+    function flatten(s) {
+        return {
+            lookback_window: s.kernel.lookback_window,
+            relative_weight: s.kernel.relative_weight,
+            regression_level: s.kernel.regression_level,
+            lag: s.kernel.lag,
+            use_kernel_smoothing: s.kernel.use_kernel_smoothing,
+            sl_type: s.stop_loss.sl_type || 'atr',
+            sl_percent: s.stop_loss.sl_percent,
+            atr_period: s.stop_loss.atr_period || 20,
+            atr_multiplier: s.stop_loss.atr_multiplier || 6.0,
+            use_dynamic_sl: s.stop_loss.use_dynamic_sl,
+            trailing_sl_mode: s.stop_loss.trailing_sl_mode,
+            volatility_min: s.volatility_filter.min,
+            volatility_max: s.volatility_filter.max,
+            enable_re_entry: s.re_entry.enabled,
+            re_entry_delay: s.re_entry.delay,
+            require_color_confirmation: s.re_entry.require_color_confirmation,
+            kill_switch_consecutive_losses: s.kill_switch.consecutive_losses,
+            kill_switch_equity_drop_percent: s.kill_switch.equity_drop_percent,
+            kill_switch_pause_hours: s.kill_switch.pause_hours,
+            leverage: s.position.leverage,
+            position_size_pct: s.position.position_size_pct,
+        };
+    }
+
+    const set = (k, v) => setForm(f => ({ ...f, [k]: v }));
+
+    async function save() {
+        try {
+            await api.post('/api/settings', form);
+            onToast('Settings saved - kernel changes apply on next candle', 'success');
+        } catch (e) { onToast(e.message, 'error'); }
+    }
+
+    async function reset() {
+        try {
+            const r = await api.post('/api/settings/reset');
+            const s = await api.get('/api/settings');
+            setForm(flatten(s));
+            onToast('Settings reset to defaults', 'success');
+        } catch (e) { onToast(e.message, 'error'); }
+    }
+
+    if (!settings) return <div className="text-gray-500">Loading...</div>;
+
+    function NumInput({ label, k, min, max, step = 1 }) {
+        return (
+            <label className="flex items-center justify-between py-1">
+                <span className="text-sm text-gray-300">{label}</span>
+                <div className="flex items-center gap-2">
+                    <input type="number" min={min} max={max} step={step}
+                           value={form[k] ?? ''} onChange={e => set(k, Number(e.target.value))}
+                           className="w-24 bg-gray-700 border border-gray-600 rounded px-2 py-1 text-sm text-right font-mono focus:border-blue-500 focus:outline-none" />
+                    <span className="text-xs text-gray-500 w-16">({min}-{max})</span>
+                </div>
+            </label>
+        );
+    }
+
+    function Toggle({ label, k }) {
+        return (
+            <label className="flex items-center justify-between py-1 cursor-pointer">
+                <span className="text-sm text-gray-300">{label}</span>
+                <input type="checkbox" checked={form[k] ?? false} onChange={e => set(k, e.target.checked)}
+                       className="w-4 h-4 accent-blue-500" />
+            </label>
+        );
+    }
+
+    return (
+        <div className="space-y-4 max-w-2xl">
+            <Card title="Kernel Regression">
+                <NumInput label="Lookback Window (h)" k="lookback_window" min={10} max={500} />
+                <NumInput label="Relative Weighting (r)" k="relative_weight" min={0.1} max={50} step={0.1} />
+                <NumInput label="Regression Level (x)" k="regression_level" min={5} max={200} />
+                <NumInput label="Lag" k="lag" min={1} max={5} />
+                <Toggle label="Kernel Smoothing" k="use_kernel_smoothing" />
+            </Card>
+            <Card title="Stop Loss">
+                <div className="flex items-center justify-between py-1">
+                    <span className="text-sm text-gray-300">SL Type</span>
+                    <div className="flex gap-3">
+                        {['atr', 'percent'].map(t => (
+                            <label key={t} className="flex items-center gap-1 cursor-pointer">
+                                <input type="radio" name="sl_type" value={t}
+                                       checked={form.sl_type === t}
+                                       onChange={() => set('sl_type', t)}
+                                       className="accent-blue-500" />
+                                <span className="text-xs text-gray-400 uppercase">{t === 'atr' ? 'ATR' : 'Percent'}</span>
+                            </label>
+                        ))}
+                    </div>
+                </div>
+                {form.sl_type === 'percent' && (
+                    <NumInput label="SL %" k="sl_percent" min={0.5} max={10} step={0.1} />
+                )}
+                {form.sl_type === 'atr' && (
+                    <>
+                        <NumInput label="ATR Period" k="atr_period" min={5} max={50} />
+                        <NumInput label="ATR Multiplier" k="atr_multiplier" min={1} max={15} step={0.5} />
+                    </>
+                )}
+                <Toggle label="Dynamic SL (trailing)" k="use_dynamic_sl" />
+                {form.use_dynamic_sl && (
+                    <div className="flex items-center justify-between py-1">
+                        <span className="text-sm text-gray-300">Trailing Mode</span>
+                        <div className="flex gap-3">
+                            {['execution', 'pine'].map(m => (
+                                <label key={m} className="flex items-center gap-1 cursor-pointer">
+                                    <input type="radio" name="trailing_sl_mode" value={m}
+                                           checked={form.trailing_sl_mode === m}
+                                           onChange={() => set('trailing_sl_mode', m)}
+                                           className="accent-blue-500" />
+                                    <span className="text-xs text-gray-400 capitalize">{m === 'execution' ? 'Execution (H/L)' : 'Pine (Close)'}</span>
+                                </label>
+                            ))}
+                        </div>
+                    </div>
+                )}
+            </Card>
+            <Card title="Volatility Filter">
+                <NumInput label="Min (ATR short period)" k="volatility_min" min={1} max={20} />
+                <NumInput label="Max (ATR long period)" k="volatility_max" min={2} max={30} />
+            </Card>
+            <Card title="Re-Entry">
+                <Toggle label="Enabled" k="enable_re_entry" />
+                <NumInput label="Delay (candles)" k="re_entry_delay" min={0} max={10} />
+                <Toggle label="Color confirmation" k="require_color_confirmation" />
+            </Card>
+            <Card title="Kill Switch">
+                <NumInput label="Consecutive losses" k="kill_switch_consecutive_losses" min={2} max={20} />
+                <NumInput label="Equity drop %" k="kill_switch_equity_drop_percent" min={5} max={30} step={0.5} />
+                <NumInput label="Pause hours" k="kill_switch_pause_hours" min={1} max={72} />
+            </Card>
+            <Card title="Position">
+                <NumInput label="Leverage" k="leverage" min={1} max={10} />
+                <NumInput label="Position Size %" k="position_size_pct" min={5} max={100} step={1} />
+                <div className="flex items-center justify-between py-1">
+                    <span className="text-sm text-gray-300">Symbol</span>
+                    <span className="text-sm font-mono text-gray-500">ETHUSDT (readonly)</span>
+                </div>
+                <div className="flex items-center justify-between py-1">
+                    <span className="text-sm text-gray-300">Timeframe</span>
+                    <span className="text-sm font-mono text-gray-500">1h (readonly)</span>
+                </div>
+            </Card>
+            <div className="flex gap-3">
+                <button onClick={save}
+                        className="flex-1 bg-blue-600 hover:bg-blue-700 text-white font-semibold py-2 px-4 rounded transition">
+                    Save Settings
+                </button>
+                <button onClick={reset}
+                        className="bg-gray-700 hover:bg-gray-600 text-gray-300 font-semibold py-2 px-4 rounded transition">
+                    Reset to Default
+                </button>
+            </div>
+            <p className="text-xs text-gray-500">
+                Note: Kernel/filter/re-entry changes apply on next candle. SL/kill switch changes apply immediately.
+            </p>
+        </div>
+    );
+}
+
+// ─── Logs Tab ───────────────────────────────────────────────────
+function LogsTab() {
+    const [lines, setLines] = useState([]);
+    const [autoScroll, setAutoScroll] = useState(true);
+    const bottomRef = useRef(null);
+
+    useEffect(() => {
+        const load = () => api.get('/api/logs').then(d => setLines(d.lines || []));
+        load();
+        const iv = setInterval(load, 5000);
+        return () => clearInterval(iv);
+    }, []);
+
+    useEffect(() => {
+        if (autoScroll && bottomRef.current) bottomRef.current.scrollIntoView({ behavior: 'smooth' });
+    }, [lines, autoScroll]);
+
+    return (
+        <div>
+            <div className="flex items-center gap-4 mb-2">
+                <label className="flex items-center gap-2 text-sm cursor-pointer">
+                    <input type="checkbox" checked={autoScroll} onChange={e => setAutoScroll(e.target.checked)} className="accent-blue-500" />
+                    Auto-scroll
+                </label>
+                <span className="text-gray-500 text-sm">Showing last {lines.length} lines</span>
+            </div>
+            <div className="bg-gray-950 rounded-lg p-3 h-[70vh] overflow-y-auto font-mono text-xs leading-5">
+                {lines.map((l, i) => {
+                    let color = 'text-gray-400';
+                    if (l.includes('[TRADE]') || l.includes('[FILL]')) color = 'text-yellow-300';
+                    else if (l.includes('[SIGNAL]')) color = 'text-blue-300';
+                    else if (l.includes('[KILL]') || l.includes('[EMERGENCY]')) color = 'text-red-400';
+                    else if (l.includes('[SL]')) color = 'text-orange-400';
+                    else if (l.includes('ERROR')) color = 'text-red-500';
+                    else if (l.includes('[CONFIG]')) color = 'text-green-300';
+                    return <div key={i} className={color}>{l}</div>;
+                })}
+                <div ref={bottomRef} />
+            </div>
+        </div>
+    );
+}
+
+// ─── AutoResearch Tab ───────────────────────────────────────────
+function AutoResearchTab({ onToast }) {
+    const [data, setData] = useState(null);
+    const [sortCol, setSortCol] = useState('score');
+    const [sortDir, setSortDir] = useState('desc');
+    const [heatSmooth, setHeatSmooth] = useState('on');
+    const [hover, setHover] = useState(null);
+    const [expandedRow, setExpandedRow] = useState(null);
+
+    useEffect(() => {
+        api.get('/api/autoresearch').then(setData).catch(() => {
+            setData({ error: 'Failed to load autoresearch data. Is the bot running?', top_20: [], heatmap: { h_values: [], x_values: [], scores_smooth_on: [], scores_smooth_off: [] } });
+        });
+    }, []);
+
+    if (!data) return <div className="text-gray-500">Loading...</div>;
+
+    const last_run = data.last_run || null;
+    const current_config = data.current_config || null;
+    const top_20 = data.top_20 || [];
+    const heatmap = data.heatmap || { h_values: [], x_values: [], scores_smooth_on: [], scores_smooth_off: [] };
+    const hasData = top_20.length > 0;
+
+    if (data.error && !hasData) return (
+        <Card title="AutoResearch">
+            <p className="text-gray-400">{data.error}</p>
+            <code className="block mt-2 text-sm text-blue-400 bg-gray-900 p-2 rounded">python autoresearch.py</code>
+        </Card>
+    );
+
+    // Sortable table
+    const cols = [
+        { k: 'rank', l: '#' },
+        { k: 'score', l: 'Score' },
+        { k: 'balanced_score', l: 'BScore' },
+        { k: 'eth_pf', l: 'ETH PF' },
+        { k: 'btc_pf', l: 'BTC PF' },
+        { k: 'sol_pf', l: 'SOL PF' },
+        { k: 'eth_dd', l: 'ETH DD' },
+        { k: 'btc_dd', l: 'BTC DD' },
+        { k: 'sol_dd', l: 'SOL DD' },
+        { k: 'eth_profit', l: 'ETH %' },
+        { k: 'btc_profit', l: 'BTC %' },
+        { k: 'sol_profit', l: 'SOL %' },
+    ];
+
+    function toggleSort(col) {
+        if (sortCol === col) setSortDir(d => d === 'desc' ? 'asc' : 'desc');
+        else { setSortCol(col); setSortDir('desc'); }
+    }
+
+    const sorted = [...top_20].sort((a, b) => {
+        const av = a[sortCol] ?? 0, bv = b[sortCol] ?? 0;
+        return sortDir === 'desc' ? bv - av : av - bv;
+    });
+
+    function rowBg(r, i) {
+        const isCurrent = current_config && (r.lookback || r.lookback_window) === current_config.h
+            && (r.regression || r.regression_level) === current_config.x
+            && (r.smoothing ?? r.use_kernel_smoothing) === current_config.smoothing;
+        if (isCurrent) return 'border-2 border-blue-500';
+        if (r.rank === 1) return 'bg-yellow-900/30';
+        if (r.rank === 2) return 'bg-gray-600/20';
+        if (r.rank === 3) return 'bg-orange-900/20';
+        return '';
+    }
+
+    function profitCell(val) {
+        const v = val || 0;
+        const color = v > 0 ? 'text-green-400' : v < 0 ? 'text-red-400' : 'text-gray-400';
+        return <span className={color}>{v > 0 ? '+' : ''}{v.toFixed(1)}%</span>;
+    }
+
+    function renderExpandedRow(r) {
+        const h = r.lookback || r.lookback_window;
+        const x = r.regression || r.regression_level;
+        const smooth = r.smoothing ?? r.use_kernel_smoothing;
+        const ethP = r.eth_profit || 0, btcP = r.btc_profit || 0, solP = r.sol_profit || 0;
+        const totalProfit = ethP + btcP + solP;
+        const profits = { ETH: ethP, BTC: btcP, SOL: solP };
+        const pfs = { ETH: r.eth_pf || 0, BTC: r.btc_pf || 0, SOL: r.sol_pf || 0 };
+        const bestAsset = Object.entries(profits).sort((a, b) => b[1] - a[1])[0];
+        const weakestAsset = Object.entries(pfs).sort((a, b) => a[1] - b[1])[0];
+        const assets = ['ETH', 'BTC', 'SOL'];
+        const metrics = [
+            { label: 'Profit', key: 'profit', fmt: v => (v > 0 ? '+' : '') + v.toFixed(1) + '%' },
+            { label: 'PF', key: 'pf', fmt: v => v.toFixed(2) },
+            { label: 'Max DD', key: 'dd', fmt: v => v.toFixed(1) + '%' },
+        ];
+        return (
+            <tr><td colSpan={cols.length + 1} className="p-0">
+                <div className="border-t border-b border-gray-600 p-4 mx-2 mb-1" style={{backgroundColor: 'rgb(42, 48, 60)'}}>
+                    <div className="grid grid-cols-2 gap-6">
+                        <div>
+                            <h4 className="text-xs font-semibold text-gray-400 uppercase tracking-wider mb-2">Configuration</h4>
+                            <div className="text-sm space-y-1 text-gray-300">
+                                <div>Lookback Window (h): <span className="text-white font-medium">{h}</span></div>
+                                <div>Regression Level (x): <span className="text-white font-medium">{x}</span></div>
+                                <div>Kernel Smoothing: <span className="text-white font-medium">{smooth ? 'On' : 'Off'}</span></div>
+                                <div>Relative Weight (r): <span className="text-white font-medium">{r.relative_weight ?? 10}</span></div>
+                                <div>Lag: <span className="text-white font-medium">{r.lag ?? 1}</span></div>
+                                <div>SL: <span className="text-white font-medium">ATR({r.atr_period ?? 20}) x {r.atr_multiplier ?? 6}</span></div>
+                                <div>Volatility Filter: <span className="text-white font-medium">{r.vol_min ?? r.volatility_min ?? 5} / {r.vol_max ?? r.volatility_max ?? 10}</span></div>
+                                <div>Re-entry delay: <span className="text-white font-medium">{r.reentry_delay ?? r.re_entry_delay ?? 1}</span></div>
+                            </div>
+                        </div>
+                        <div>
+                            <h4 className="text-xs font-semibold text-gray-400 uppercase tracking-wider mb-2">Results Per Asset</h4>
+                            <table className="text-sm w-full">
+                                <thead><tr className="text-gray-400">
+                                    <th className="text-left pb-1 pr-4"></th>
+                                    {assets.map(a => <th key={a} className="text-center pb-1 px-2">{a}USDT</th>)}
+                                </tr></thead>
+                                <tbody>
+                                    {metrics.map(m => (
+                                        <tr key={m.key} className="border-t border-gray-700">
+                                            <td className="py-1 pr-4 text-gray-400">{m.label}</td>
+                                            {assets.map(a => {
+                                                const val = r[`${a.toLowerCase()}_${m.key}`] || 0;
+                                                const color = m.key === 'profit' ? (val > 0 ? 'text-green-400' : val < 0 ? 'text-red-400' : '') :
+                                                              m.key === 'dd' ? (val > 30 ? 'text-red-400' : val > 20 ? 'text-yellow-400' : 'text-green-400') : '';
+                                                return <td key={a} className={`py-1 px-2 text-center ${color}`}>{m.fmt(val)}</td>;
+                                            })}
+                                        </tr>
+                                    ))}
+                                </tbody>
+                            </table>
+                        </div>
+                    </div>
+                    <div className="mt-4 pt-3 border-t border-gray-700">
+                        <h4 className="text-xs font-semibold text-gray-400 uppercase tracking-wider mb-2">Cross-Asset Summary</h4>
+                        <div className="flex flex-wrap gap-x-8 gap-y-1 text-sm text-gray-300">
+                            <div>Total profit: <span className={`font-medium ${totalProfit > 0 ? 'text-green-400' : 'text-red-400'}`}>{totalProfit > 0 ? '+' : ''}{totalProfit.toFixed(1)}%</span></div>
+                            <div>Score: <span className="text-white font-medium">{(r.score || 0).toFixed(4)}</span></div>
+                            <div>Best asset: <span className="text-green-400">{bestAsset[0]} ({bestAsset[1] > 0 ? '+' : ''}{bestAsset[1].toFixed(1)}%)</span></div>
+                            <div>Weakest asset: <span className="text-yellow-400">{weakestAsset[0]} (PF {weakestAsset[1].toFixed(2)})</span></div>
+                        </div>
+                    </div>
+                </div>
+            </td></tr>
+        );
+    }
+
+    // Heatmap rendering
+    function renderHeatmap() {
+        if (!heatmap || !heatmap.h_values.length) return null;
+        const { h_values, x_values, scores_smooth_on, scores_smooth_off } = heatmap;
+
+        let matrix;
+        if (heatSmooth === 'on') matrix = scores_smooth_on;
+        else if (heatSmooth === 'off') matrix = scores_smooth_off;
+        else {
+            // Best of both
+            matrix = scores_smooth_on.map((row, hi) =>
+                row.map((v, xi) => Math.max(v, scores_smooth_off[hi]?.[xi] ?? -1))
+            );
+        }
+
+        const cellW = Math.max(6, Math.min(14, Math.floor(700 / x_values.length)));
+        const cellH = Math.max(6, Math.min(14, Math.floor(400 / h_values.length)));
+        const padL = 35, padT = 25;
+        const W = padL + x_values.length * cellW + 10;
+        const H = padT + h_values.length * cellH + 10;
+
+        function scoreColor(s) {
+            if (s <= 0) return '#1a1a2e';
+            if (s < 1.0) return '#7f1d1d';
+            if (s < 1.3) return '#c2410c';
+            if (s < 1.5) return '#ca8a04';
+            if (s < 1.7) return '#65a30d';
+            if (s < 1.9) return '#16a34a';
+            return '#22c55e';
+        }
+
+        // Find best cell
+        let bestH = 0, bestX = 0, bestScore = 0;
+        matrix.forEach((row, hi) => row.forEach((s, xi) => {
+            if (s > bestScore) { bestScore = s; bestH = hi; bestX = xi; }
+        }));
+
+        // Current config indices
+        let curHi = -1, curXi = -1;
+        if (current_config) {
+            curHi = h_values.indexOf(current_config.h);
+            curXi = x_values.indexOf(current_config.x);
+        }
+
+        return (
+            <div className="relative">
+                <svg width={W} height={H} className="block">
+                    {/* X axis labels (regression) — show every Nth */}
+                    {x_values.map((x, xi) => {
+                        const step = x_values.length > 30 ? (x_values.length > 60 ? 10 : 5) : 1;
+                        if (xi % step !== 0) return null;
+                        return <text key={`xl${xi}`} x={padL + xi * cellW + cellW/2} y={padT - 5}
+                            textAnchor="middle" fill="#9ca3af" fontSize="8" fontFamily="monospace">{x}</text>;
+                    })}
+                    {/* Y axis labels (lookback) */}
+                    {h_values.map((h, hi) => {
+                        const step = h_values.length > 30 ? (h_values.length > 60 ? 10 : 5) : 1;
+                        if (hi % step !== 0) return null;
+                        return <text key={`yl${hi}`} x={padL - 4} y={padT + hi * cellH + cellH/2 + 3}
+                            textAnchor="end" fill="#9ca3af" fontSize="8" fontFamily="monospace">{h}</text>;
+                    })}
+                    {/* Cells */}
+                    {matrix.map((row, hi) => row.map((s, xi) => (
+                        <rect key={`${hi}-${xi}`} x={padL + xi * cellW} y={padT + hi * cellH}
+                              width={cellW} height={cellH} fill={scoreColor(s)} stroke="#111827" strokeWidth="0.5"
+                              onMouseEnter={() => setHover({h: h_values[hi], x: x_values[xi], s, hi, xi})}
+                              onMouseLeave={() => setHover(null)}
+                              className="cursor-pointer" />
+                    )))}
+                    {/* Current config marker */}
+                    {curHi >= 0 && curXi >= 0 && (
+                        <rect x={padL + curXi * cellW} y={padT + curHi * cellH}
+                              width={cellW} height={cellH} fill="none" stroke="white" strokeWidth="2" />
+                    )}
+                    {/* Best marker */}
+                    {bestScore > 0 && (
+                        <text x={padL + bestX * cellW + cellW/2} y={padT + bestH * cellH + cellH/2 + 3}
+                              textAnchor="middle" fill="#fbbf24" fontSize={Math.min(cellW, cellH) - 1}
+                              fontFamily="monospace" pointerEvents="none">*</text>
+                    )}
+                </svg>
+                {hover && hover.s > -1 && (
+                    <div className="absolute bg-gray-800 border border-gray-600 rounded px-2 py-1 text-xs pointer-events-none shadow-lg"
+                         style={{left: padL + hover.xi * cellW + cellW + 5, top: padT + hover.hi * cellH}}>
+                        <div className="text-white font-semibold">h={hover.h}, x={hover.x}</div>
+                        <div className="text-gray-300">Score: {hover.s > 0 ? hover.s.toFixed(4) : 'REJECTED'}</div>
+                        {hover.s > 0 && (() => {
+                            const match = top_20.find(r => (r.lookback || r.lookback_window) === hover.h && (r.regression || r.regression_level) === hover.x);
+                            if (!match) return null;
+                            return <div className="text-gray-400">
+                                ETH PF={match.eth_pf} BTC PF={match.btc_pf} SOL PF={match.sol_pf}
+                            </div>;
+                        })()}
+                    </div>
+                )}
+            </div>
+        );
+    }
+
+    const best = top_20[0];
+
+    async function applyBest() {
+        if (!best) return;
+        const bh = best.lookback || best.lookback_window;
+        const bx = best.regression || best.regression_level;
+        const bs = best.smoothing ?? best.use_kernel_smoothing;
+        const msg = `Change bot config to h=${bh}, x=${bx}, smoothing=${bs ? 'On' : 'Off'}?\nKernel changes apply on next candle.`;
+        if (!confirm(msg)) return;
+        try {
+            await api.post('/api/settings', {
+                lookback_window: bh,
+                regression_level: bx,
+                use_kernel_smoothing: bs,
+            });
+            onToast('Settings applied - kernel changes apply on next candle', 'success');
+        } catch (e) { onToast(e.message, 'error'); }
+    }
+
+    return (
+        <div className="space-y-4">
+            {/* 1. Last Run Info */}
+            {last_run && (
+                <Card title="Last Run Info">
+                    <div className="grid grid-cols-2 md:grid-cols-4 gap-2 text-sm">
+                        <div><span className="text-gray-400">Date: </span><span className="font-mono">{last_run.date?.replace('T', ' ').slice(0, 16)}</span></div>
+                        <div><span className="text-gray-400">Combos: </span><span className="font-mono">{last_run.combinations_tested}</span></div>
+                        <div><span className="text-gray-400">Valid: </span><span className="font-mono text-green-400">{last_run.valid}</span>
+                            <span className="text-gray-500"> / rejected: </span><span className="font-mono text-red-400">{last_run.rejected}</span></div>
+                        <div><span className="text-gray-400">Duration: </span><span className="font-mono">{last_run.duration_seconds ? Math.floor(last_run.duration_seconds/60) + 'm' : '-'}</span></div>
+                        <div><span className="text-gray-400">Assets: </span><span className="font-mono">{last_run.assets?.join(', ')}</span></div>
+                        <div><span className="text-gray-400">Grid: </span><span className="font-mono">h={last_run.h_range?.join('-')}, x={last_run.x_range?.join('-')}</span></div>
+                        <div><span className="text-gray-400">Smoothing: </span><span className="font-mono">{last_run.smoothing}</span></div>
+                        <div><span className="text-gray-400">SL: </span><span className="font-mono">ATR({last_run.fixed_params?.atr_period})x{last_run.fixed_params?.atr_multiplier}</span></div>
+                    </div>
+                </Card>
+            )}
+
+            {/* 2. Current Config + 3. Comparison */}
+            {current_config && best && (
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                    <Card title="Current Bot Config (Baseline)">
+                        <div className="text-sm">
+                            <div className="font-mono text-lg text-blue-400 mb-2">h={current_config.h}, x={current_config.x}, smooth={current_config.smoothing ? 'On' : 'Off'}</div>
+                            <div className="text-gray-300">Score: <span className="font-mono text-white">{current_config.score?.toFixed(4) || 'N/A'}</span></div>
+                            {current_config.eth && <div className="mt-1 text-gray-400">ETH: PF={current_config.eth.pf}, DD={current_config.eth.dd}%, +{current_config.eth.profit}%</div>}
+                            {current_config.btc && <div className="text-gray-400">BTC: PF={current_config.btc.pf}, DD={current_config.btc.dd}%, +{current_config.btc.profit}%</div>}
+                            {current_config.sol && <div className="text-gray-400">SOL: PF={current_config.sol.pf}, DD={current_config.sol.dd}%, +{current_config.sol.profit}%</div>}
+                        </div>
+                    </Card>
+                    <Card title="Best vs Current">
+                        <table className="text-sm w-full">
+                            <thead><tr className="text-gray-500 text-xs">
+                                <th className="text-left">Metric</th><th>Current</th><th>Best</th><th>Diff</th>
+                            </tr></thead>
+                            <tbody>
+                                {[
+                                    { label: 'Score', cur: current_config.score, best: best.score },
+                                    { label: 'ETH PF', cur: current_config.eth?.pf, best: best.eth_pf },
+                                    { label: 'BTC PF', cur: current_config.btc?.pf, best: best.btc_pf },
+                                    { label: 'SOL PF', cur: current_config.sol?.pf, best: best.sol_pf },
+                                    { label: 'ETH DD', cur: current_config.eth?.dd, best: best.eth_dd, unit: '%', lower: true },
+                                    { label: 'BTC DD', cur: current_config.btc?.dd, best: best.btc_dd, unit: '%', lower: true },
+                                    { label: 'SOL DD', cur: current_config.sol?.dd, best: best.sol_dd, unit: '%', lower: true },
+                                ].filter(r => r.cur != null && r.best != null).map(r => {
+                                    const diff = r.best - r.cur;
+                                    const better = r.lower ? diff < -0.01 : diff > 0.01;
+                                    const worse = r.lower ? diff > 0.01 : diff < -0.01;
+                                    const color = better ? 'text-green-400' : worse ? 'text-red-400' : 'text-gray-400';
+                                    return (
+                                        <tr key={r.label}>
+                                            <td className="text-gray-400 pr-4 py-0.5">{r.label}</td>
+                                            <td className="font-mono pr-4">{typeof r.cur === 'number' ? r.cur.toFixed(2) : r.cur}{r.unit||''}</td>
+                                            <td className="font-mono pr-4">{typeof r.best === 'number' ? r.best.toFixed(2) : r.best}{r.unit||''}</td>
+                                            <td className={`font-mono ${color}`}>
+                                                {Math.abs(diff) < 0.01 ? '~' : better ? 'v' : '^'} {diff > 0 ? '+' : ''}{diff.toFixed(2)}
+                                            </td>
+                                        </tr>
+                                    );
+                                })}
+                            </tbody>
+                        </table>
+                    </Card>
+                </div>
+            )}
+
+            {/* 4. TOP 20 Table */}
+            <Card title={`Top ${top_20.length} Configurations (click row for details)`}>
+                {top_20.length === 0 ? (
+                    <p className="text-gray-500 text-sm">No valid configurations found. Run autoresearch first.</p>
+                ) : <div className="overflow-x-auto">
+                    <table className="w-full text-xs font-mono">
+                        <thead><tr className="text-gray-500 border-b border-gray-700">
+                            {cols.map(c => (
+                                <th key={c.k} className="text-left px-1 py-1 cursor-pointer hover:text-white select-none whitespace-nowrap"
+                                    onClick={() => toggleSort(c.k)}>
+                                    {c.l}{sortCol === c.k ? (sortDir === 'desc' ? ' \u25BC' : ' \u25B2') : ''}
+                                </th>
+                            ))}
+                            <th className="px-1 py-1 w-8"></th>
+                        </tr></thead>
+                        <tbody>
+                            {sorted.map((r, i) => {
+                                const isCur = current_config && (r.lookback || r.lookback_window) === current_config.h
+                                    && (r.regression || r.regression_level) === current_config.x
+                                    && (r.smoothing ?? r.use_kernel_smoothing) === current_config.smoothing;
+                                const isExpanded = expandedRow === i;
+                                return (
+                                    <React.Fragment key={i}>
+                                        <tr className={`border-b border-gray-800 hover:bg-gray-700/30 cursor-pointer ${rowBg(r, i)} ${isExpanded ? 'bg-gray-700/60' : ''}`}
+                                            onClick={() => setExpandedRow(prev => prev === i ? null : i)}>
+                                            <td className="px-1 py-0.5 text-gray-500">{r.rank}</td>
+                                            <td className="px-1 text-yellow-300 font-semibold">{r.score?.toFixed(4)}</td>
+                                            <td className="px-1 text-cyan-400">{(r.balanced_score || 0).toFixed(4)}</td>
+                                            <td className="px-1">{r.eth_pf?.toFixed(2)}</td>
+                                            <td className="px-1">{r.btc_pf?.toFixed(2)}</td>
+                                            <td className="px-1">{r.sol_pf?.toFixed(2)}</td>
+                                            <td className="px-1">{r.eth_dd?.toFixed(1)}%</td>
+                                            <td className="px-1">{r.btc_dd?.toFixed(1)}%</td>
+                                            <td className="px-1">{r.sol_dd?.toFixed(1)}%</td>
+                                            <td className="px-1">{profitCell(r.eth_profit)}</td>
+                                            <td className="px-1">{profitCell(r.btc_profit)}</td>
+                                            <td className="px-1">
+                                                {profitCell(r.sol_profit)}
+                                                {isCur && <span className="ml-1 text-blue-400 text-[10px]">CUR</span>}
+                                            </td>
+                                            <td className="px-1 text-gray-500">{isExpanded ? '\u25B2' : '\u25BC'}</td>
+                                        </tr>
+                                        {isExpanded && renderExpandedRow(r)}
+                                    </React.Fragment>
+                                );
+                            })}
+                        </tbody>
+                    </table>
+                </div>}
+            </Card>
+
+            {/* 5. Heatmap */}
+            {heatmap && heatmap.h_values.length > 0 && (
+                <Card title="Parameter Heatmap (Score)">
+                    <div className="flex items-center gap-4 mb-3">
+                        <span className="text-xs text-gray-400">Smoothing:</span>
+                        <select value={heatSmooth} onChange={e => setHeatSmooth(e.target.value)}
+                                className="bg-gray-700 text-sm text-white rounded px-2 py-1 border border-gray-600">
+                            <option value="on">On</option>
+                            <option value="off">Off</option>
+                            <option value="best">Best of both</option>
+                        </select>
+                        <div className="flex items-center gap-1 ml-4 text-[10px]">
+                            <span className="text-gray-500">Legend:</span>
+                            {[{c:'#1a1a2e',l:'Rej'},{c:'#7f1d1d',l:'<1.0'},{c:'#c2410c',l:'1.0'},{c:'#ca8a04',l:'1.3'},
+                              {c:'#65a30d',l:'1.5'},{c:'#16a34a',l:'1.7'},{c:'#22c55e',l:'>1.9'}].map(({c,l}) => (
+                                <span key={l} className="flex items-center gap-0.5">
+                                    <span className="inline-block w-3 h-3 rounded-sm" style={{background:c}}></span>
+                                    <span className="text-gray-400">{l}</span>
+                                </span>
+                            ))}
+                            <span className="ml-2 text-gray-400">[ ] = current</span>
+                            <span className="ml-1 text-yellow-400">* = best</span>
+                        </div>
+                    </div>
+                    <div className="text-[10px] text-gray-500 mb-1">Y: lookback (h) | X: regression (x)</div>
+                    <div className="overflow-x-auto">
+                        {renderHeatmap()}
+                    </div>
+                </Card>
+            )}
+
+            {/* 6. Action Buttons */}
+            <div className="flex gap-3">
+                {best && (
+                    <button onClick={applyBest}
+                            className="bg-blue-600 hover:bg-blue-700 text-white font-semibold py-2 px-6 rounded transition text-sm">
+                        Apply Best Config (h={best.lookback || best.lookback_window}, x={best.regression || best.regression_level})
+                    </button>
+                )}
+                <a href="/api/autoresearch/export" download
+                   className="bg-gray-700 hover:bg-gray-600 text-white font-semibold py-2 px-6 rounded transition text-sm inline-flex items-center">
+                    Export CSV
+                </a>
+            </div>
+        </div>
+    );
+}
+
+// ─── Signals Tab ────────────────────────────────────────────────
+function SignalsTab() {
+    const [live, setLive] = useState(null);
+    const [history, setHistory] = useState([]);
+    const prevActionSeq = useRef(null);
+    const [flash, setFlash] = useState(false);
+
+    useEffect(() => {
+        const load = () => {
+            api.get('/api/signals').then(d => {
+                setLive(d);
+                if (prevActionSeq.current !== null && d.action_seq !== prevActionSeq.current) {
+                    setFlash(true);
+                    setTimeout(() => setFlash(false), 1500);
+                }
+                prevActionSeq.current = d.action_seq;
+            }).catch(() => {});
+            api.get('/api/signal-history').then(d => setHistory(d.history || [])).catch(() => {});
+        };
+        load();
+        const iv = setInterval(load, 10000);
+        return () => clearInterval(iv);
+    }, []);
+
+    function actionColor(action) {
+        if (!action) return 'text-gray-500';
+        if (action.includes('open_long'))   return 'text-green-400';
+        if (action.includes('open_short'))  return 'text-red-400';
+        if (action.includes('close_long'))  return 'text-green-300';
+        if (action.includes('close_short')) return 'text-red-300';
+        return 'text-gray-300';
+    }
+
+    function actionBadge(action) {
+        if (!action) return <span className="text-gray-600">—</span>;
+        const colors = {
+            open_long:   'bg-green-900/60 text-green-300 border border-green-700',
+            open_short:  'bg-red-900/60 text-red-300 border border-red-700',
+            close_long:  'bg-green-900/30 text-green-400 border border-green-800',
+            close_short: 'bg-red-900/30 text-red-400 border border-red-800',
+        };
+        const cls = colors[action] || 'bg-gray-700 text-gray-300 border border-gray-600';
+        return <span className={`px-2 py-0.5 rounded text-xs font-mono font-semibold ${cls}`}>{action}</span>;
+    }
+
+    function reasonBadge(reason) {
+        if (!reason) return <span className="text-gray-600">—</span>;
+        const colors = {
+            bullish_change: 'text-green-400',
+            bearish_change: 'text-red-400',
+            stop_loss:      'text-orange-400',
+            color_change:   'text-blue-400',
+            re_entry:       'text-purple-400',
+        };
+        return <span className={`text-xs font-mono ${colors[reason] || 'text-gray-400'}`}>{reason}</span>;
+    }
+
+    function fmtTime(ts) {
+        if (!ts) return '—';
+        const d = new Date(ts * 1000);
+        return d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' });
+    }
+
+    function fmtDate(ts) {
+        if (!ts) return '—';
+        const d = new Date(ts * 1000);
+        return d.toLocaleDateString([], { month: 'short', day: 'numeric' }) + ' ' + d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+    }
+
+    const sig = live?.last_signal || {};
+
+    return (
+        <div className="space-y-4">
+            {/* Live status bar */}
+            <Card title="Live Signal Status">
+                <div className={`grid grid-cols-2 md:grid-cols-4 gap-4 text-sm transition-all duration-300 ${flash ? 'ring-2 ring-yellow-400 rounded' : ''}`}>
+                    <div>
+                        <div className="text-gray-500 text-xs uppercase tracking-wider mb-1">Last Action</div>
+                        {actionBadge(live?.last_action)}
+                    </div>
+                    <div>
+                        <div className="text-gray-500 text-xs uppercase tracking-wider mb-1">Reason</div>
+                        {reasonBadge(live?.last_reason)}
+                    </div>
+                    <div>
+                        <div className="text-gray-500 text-xs uppercase tracking-wider mb-1">Signal Seq</div>
+                        <span className="font-mono text-white">{live?.signal_seq ?? '—'}</span>
+                        <span className="text-gray-600 text-xs ml-1">(heartbeat)</span>
+                    </div>
+                    <div>
+                        <div className="text-gray-500 text-xs uppercase tracking-wider mb-1">Action Seq</div>
+                        <span className="font-mono text-yellow-300">{live?.action_seq ?? '—'}</span>
+                        <span className="text-gray-600 text-xs ml-1">(trade signals)</span>
+                    </div>
+                </div>
+                {sig.yhat1 != null && (
+                    <div className="mt-3 pt-3 border-t border-gray-700 grid grid-cols-2 md:grid-cols-5 gap-2 text-sm font-mono">
+                        <div>yhat1: <span className="text-blue-300">{Number(sig.yhat1).toFixed(2)}</span></div>
+                        <div>yhat2: <span className="text-purple-300">{Number(sig.yhat2).toFixed(2)}</span></div>
+                        <div>Direction: <span className={sig.is_bullish ? 'text-green-400' : 'text-red-400'}>{sig.is_bullish ? 'BULLISH' : 'BEARISH'}</span></div>
+                        <div>Vol filter: <span className={sig.vol_passes ? 'text-green-400' : 'text-yellow-400'}>{sig.vol_passes ? 'PASS' : 'BLOCK'}</span></div>
+                        <div>Updated: <span className="text-gray-400">{fmtTime(live?.last_loop_time)}</span></div>
+                    </div>
+                )}
+                {sig.yhat1 == null && (
+                    <div className="mt-3 text-gray-600 text-sm">Waiting for first candle close...</div>
+                )}
+            </Card>
+
+            {/* Signal history table */}
+            <Card title={`Signal History (last ${history.length} actions)`}>
+                {history.length === 0 ? (
+                    <div className="text-gray-600 text-sm py-4 text-center">
+                        No trade actions yet — signals will appear here after the first candle with a directional change.
+                    </div>
+                ) : (
+                    <div className="overflow-x-auto">
+                        <table className="w-full text-sm font-mono">
+                            <thead>
+                                <tr className="text-gray-500 border-b border-gray-700 text-xs uppercase tracking-wider">
+                                    <th className="text-left py-2 pr-4">Time</th>
+                                    <th className="text-left pr-4">Action</th>
+                                    <th className="text-left pr-4">Reason</th>
+                                    <th className="text-left pr-4">Direction</th>
+                                    <th className="text-right pr-4">yhat1</th>
+                                    <th className="text-right">yhat2</th>
+                                </tr>
+                            </thead>
+                            <tbody>
+                                {[...history].reverse().map((h, i) => (
+                                    <tr key={i} className="border-b border-gray-800 hover:bg-gray-700/20">
+                                        <td className="py-1.5 pr-4 text-gray-400 whitespace-nowrap">{fmtDate(h.timestamp)}</td>
+                                        <td className="pr-4">{actionBadge(h.action)}</td>
+                                        <td className="pr-4">{reasonBadge(h.reason)}</td>
+                                        <td className={`pr-4 ${h.is_bullish ? 'text-green-400' : h.is_bullish === false ? 'text-red-400' : 'text-gray-600'}`}>
+                                            {h.is_bullish === true ? 'BULLISH' : h.is_bullish === false ? 'BEARISH' : '—'}
+                                        </td>
+                                        <td className="text-right pr-4 text-blue-300">{h.yhat1 != null ? Number(h.yhat1).toFixed(2) : '—'}</td>
+                                        <td className="text-right text-purple-300">{h.yhat2 != null ? Number(h.yhat2).toFixed(2) : '—'}</td>
+                                    </tr>
+                                ))}
+                            </tbody>
+                        </table>
+                    </div>
+                )}
+            </Card>
+        </div>
+    );
+}
+
+// ─── Leaderboard Tab ────────────────────────────────────────────
+function LeaderboardTab({ onToast }) {
+    const [data, setData] = useState(null);
+    const [sortCol, setSortCol] = useState('score');
+    const [sortDir, setSortDir] = useState('desc');
+    const [expandedRow, setExpandedRow] = useState(null);
+
+    useEffect(() => {
+        api.get('/api/leaderboard').then(setData).catch(() => {
+            setData({ error: 'Failed to load leaderboard data.', top_20: [], total_runs: 0, unique_configs: 0 });
+        });
+    }, []);
+
+    if (!data) return <div className="text-gray-500">Loading...</div>;
+
+    const top20 = data.top_20 || [];
+
+    const sorted20 = [...top20].sort((a, b) => {
+        const av = a[sortCol] ?? 0, bv = b[sortCol] ?? 0;
+        return sortDir === 'asc' ? (av > bv ? 1 : -1) : (av < bv ? 1 : -1);
+    });
+
+    function toggleSort(col) {
+        if (sortCol === col) setSortDir(d => d === 'asc' ? 'desc' : 'asc');
+        else { setSortCol(col); setSortDir('desc'); }
+    }
+
+    function sortIndicator(col) {
+        if (sortCol !== col) return '';
+        return sortDir === 'asc' ? ' \u25B2' : ' \u25BC';
+    }
+
+    const cols = [
+        { key: 'rank', label: '#' },
+        { key: 'config', label: 'Config' },
+        { key: 'score', label: 'Score' },
+        { key: 'balanced_score', label: 'BScore' },
+        { key: 'eth_pf', label: 'ETH PF' },
+        { key: 'btc_pf', label: 'BTC PF' },
+        { key: 'sol_pf', label: 'SOL PF' },
+        { key: 'eth_profit', label: 'ETH %' },
+        { key: 'btc_profit', label: 'BTC %' },
+        { key: 'sol_profit', label: 'SOL %' },
+        { key: 'first_found', label: 'First Found' },
+    ];
+
+    function configLabel(r) {
+        const h = r.lookback ?? r.lookback_window ?? '?';
+        const x = r.regression ?? r.regression_level ?? '?';
+        const rw = r.relative_weight ?? 10;
+        const sm = (r.smoothing ?? r.use_kernel_smoothing) ? '' : ' smOff';
+        const atrP = r.atr_period ?? 20;
+        const atrM = r.atr_multiplier ?? 6;
+        const extra = [];
+        if (rw != 10) extra.push(`r${rw}`);
+        if (atrP != 20 || atrM != 6) extra.push(`atr${atrP}x${atrM}`);
+        return `h${h} x${x}${extra.length ? ' ' + extra.join(' ') : ''}${sm}`;
+    }
+
+    function profitCell(val) {
+        const v = val || 0;
+        const color = v > 0 ? 'text-green-400' : v < 0 ? 'text-red-400' : 'text-gray-400';
+        return <span className={color}>{v > 0 ? '+' : ''}{v.toFixed(1)}%</span>;
+    }
+
+    async function applyConfig(row) {
+        const rh = row.lookback ?? row.lookback_window;
+        const rx = row.regression ?? row.regression_level;
+        const rs = row.smoothing ?? row.use_kernel_smoothing;
+        if (!confirm(`Apply h=${rh}, x=${rx}, smooth=${rs ? 'On' : 'Off'} to bot?`)) return;
+        try {
+            await api.post('/api/settings', {
+                lookback_window: rh,
+                regression_level: rx,
+                use_kernel_smoothing: rs,
+            });
+            onToast('Config applied!', 'success');
+        } catch (e) { onToast(e.message, 'error'); }
+    }
+
+    function toggleExpand(idx) {
+        setExpandedRow(prev => prev === idx ? null : idx);
+    }
+
+    function renderExpandedDetails(r) {
+        const ethP = r.eth_profit || 0, btcP = r.btc_profit || 0, solP = r.sol_profit || 0;
+        const totalProfit = ethP + btcP + solP;
+        const profits = { ETH: ethP, BTC: btcP, SOL: solP };
+        const pfs = { ETH: r.eth_pf || 0, BTC: r.btc_pf || 0, SOL: r.sol_pf || 0 };
+        const bestAsset = Object.entries(profits).sort((a, b) => b[1] - a[1])[0];
+        const weakestAsset = Object.entries(pfs).sort((a, b) => a[1] - b[1])[0];
+
+        const assets = ['ETH', 'BTC', 'SOL'];
+        const metrics = [
+            { label: 'Profit', key: 'profit', fmt: v => (v > 0 ? '+' : '') + v.toFixed(1) + '%' },
+            { label: 'PF', key: 'pf', fmt: v => v.toFixed(2) },
+            { label: 'Max DD', key: 'dd', fmt: v => v.toFixed(1) + '%' },
+        ];
+
+        return (
+            <tr>
+                <td colSpan={cols.length + 1} className="p-0">
+                    <div className="bg-gray-750 border-t border-b border-gray-600 p-4 mx-2 mb-1" style={{backgroundColor: 'rgb(42, 48, 60)'}}>
+                        <div className="grid grid-cols-2 gap-6">
+                            <div>
+                                <h4 className="text-xs font-semibold text-gray-400 uppercase tracking-wider mb-2">Configuration</h4>
+                                <div className="text-sm space-y-1 text-gray-300">
+                                    <div>Lookback Window (h): <span className="text-white font-medium">{r.lookback || r.lookback_window}</span></div>
+                                    <div>Regression Level (x): <span className="text-white font-medium">{r.regression || r.regression_level}</span></div>
+                                    <div>Kernel Smoothing: <span className="text-white font-medium">{r.smoothing ? 'On' : 'Off'}</span></div>
+                                    <div>Relative Weight (r): <span className="text-white font-medium">{r.relative_weight ?? 10}</span></div>
+                                    <div>Lag: <span className="text-white font-medium">{r.lag ?? 1}</span></div>
+                                    <div>SL: <span className="text-white font-medium">ATR({r.atr_period ?? 20}) x {r.atr_multiplier ?? 6}</span></div>
+                                    <div>Volatility Filter: <span className="text-white font-medium">{r.vol_min ?? r.volatility_min ?? 5} / {r.vol_max ?? r.volatility_max ?? 10}</span></div>
+                                    <div>Re-entry delay: <span className="text-white font-medium">{r.reentry_delay ?? r.re_entry_delay ?? 1}</span></div>
+                                </div>
+                            </div>
+
+                            <div>
+                                <h4 className="text-xs font-semibold text-gray-400 uppercase tracking-wider mb-2">Results Per Asset</h4>
+                                <table className="text-sm w-full">
+                                    <thead>
+                                        <tr className="text-gray-400">
+                                            <th className="text-left pb-1 pr-4"></th>
+                                            {assets.map(a => <th key={a} className="text-center pb-1 px-2">{a}USDT</th>)}
+                                        </tr>
+                                    </thead>
+                                    <tbody>
+                                        {metrics.map(m => (
+                                            <tr key={m.key} className="border-t border-gray-700">
+                                                <td className="py-1 pr-4 text-gray-400">{m.label}</td>
+                                                {assets.map(a => {
+                                                    const val = r[`${a.toLowerCase()}_${m.key}`] || 0;
+                                                    const color = m.key === 'profit' ? (val > 0 ? 'text-green-400' : val < 0 ? 'text-red-400' : '') :
+                                                                  m.key === 'dd' ? (val > 30 ? 'text-red-400' : val > 20 ? 'text-yellow-400' : 'text-green-400') : '';
+                                                    return <td key={a} className={`py-1 px-2 text-center ${color}`}>{m.fmt(val)}</td>;
+                                                })}
+                                            </tr>
+                                        ))}
+                                    </tbody>
+                                </table>
+                            </div>
+                        </div>
+
+                        <div className="mt-4 pt-3 border-t border-gray-700">
+                            <h4 className="text-xs font-semibold text-gray-400 uppercase tracking-wider mb-2">Cross-Asset Summary</h4>
+                            <div className="flex flex-wrap gap-x-8 gap-y-1 text-sm text-gray-300">
+                                <div>Total profit: <span className={`font-medium ${totalProfit > 0 ? 'text-green-400' : 'text-red-400'}`}>{totalProfit > 0 ? '+' : ''}{totalProfit.toFixed(1)}%</span> <span className="text-gray-500">(sum across assets)</span></div>
+                                <div>Score: <span className="text-white font-medium">{(r.score || 0).toFixed(4)}</span> <span className="text-gray-500">(avg_PF x min_PF)</span></div>
+                                <div>Best asset: <span className="text-green-400">{bestAsset[0]} ({bestAsset[1] > 0 ? '+' : ''}{bestAsset[1].toFixed(1)}%)</span></div>
+                                <div>Weakest asset: <span className="text-yellow-400">{weakestAsset[0]} (PF {weakestAsset[1].toFixed(2)})</span></div>
+                                <div>First found: <span className="text-white">{(r.first_found || r.run_date || '-').substring(0, 10)}</span></div>
+                            </div>
+                            <button onClick={(e) => { e.stopPropagation(); applyConfig(r); }}
+                                    className="mt-3 text-sm bg-blue-600 hover:bg-blue-700 text-white px-4 py-1.5 rounded transition">
+                                Apply This Config to Bot
+                            </button>
+                        </div>
+                    </div>
+                </td>
+            </tr>
+        );
+    }
+
+    return (
+        <div className="space-y-4">
+            {data.error && <div className="bg-yellow-900/50 border border-yellow-600 text-yellow-200 p-3 rounded text-sm">{data.error}</div>}
+
+            <Card title="ALL-TIME BEST CONFIGURATIONS">
+                <div className="flex gap-6 text-sm text-gray-400 mb-4">
+                    <span>Total runs recorded: <span className="text-white font-semibold">{data.total_runs || 0}</span></span>
+                    <span>Unique configs: <span className="text-white font-semibold">{data.unique_configs || 0}</span></span>
+                </div>
+
+                {top20.length === 0 ? (
+                    <div className="text-gray-500 text-sm">No results yet. Run autoresearch.py to populate the leaderboard.</div>
+                ) : (
+                    <div className="overflow-x-auto">
+                        <table className="w-full text-sm">
+                            <thead>
+                                <tr className="text-left text-gray-400 border-b border-gray-700">
+                                    {cols.map(c => (
+                                        <th key={c.key} className="pb-2 pr-3 cursor-pointer hover:text-white whitespace-nowrap"
+                                            onClick={() => toggleSort(c.key)}>
+                                            {c.label}{sortIndicator(c.key)}
+                                        </th>
+                                    ))}
+                                    <th className="pb-2 w-16"></th>
+                                </tr>
+                            </thead>
+                            <tbody>
+                                {sorted20.map((r, idx) => {
+                                    const rank = r.rank || idx + 1;
+                                    const medal = rank === 1 ? '\uD83E\uDD47' : rank === 2 ? '\uD83E\uDD48' : rank === 3 ? '\uD83E\uDD49' : rank;
+                                    const rowBg = rank === 1 ? 'bg-yellow-900/20 border-l-2 border-yellow-500'
+                                        : rank === 2 ? 'bg-gray-700/30 border-l-2 border-gray-400'
+                                        : rank === 3 ? 'bg-orange-900/20 border-l-2 border-orange-600'
+                                        : '';
+                                    const isExpanded = expandedRow === idx;
+                                    return (
+                                        <React.Fragment key={idx}>
+                                            <tr className={`border-b border-gray-800 hover:bg-gray-700/50 cursor-pointer ${rowBg} ${isExpanded ? 'bg-gray-700/60' : ''}`}
+                                                onClick={() => toggleExpand(idx)}>
+                                                <td className="py-1.5 pr-3 font-mono">{medal}</td>
+                                                <td className="py-1.5 pr-3 font-mono text-blue-300 whitespace-nowrap">{configLabel(r)}</td>
+                                                <td className="py-1.5 pr-3 font-semibold text-green-400">{(r.score || 0).toFixed(4)}</td>
+                                                <td className="py-1.5 pr-3 text-cyan-400">{(r.balanced_score || 0).toFixed(4)}</td>
+                                                <td className="py-1.5 pr-3">{(r.eth_pf || 0).toFixed(2)}</td>
+                                                <td className="py-1.5 pr-3">{(r.btc_pf || 0).toFixed(2)}</td>
+                                                <td className="py-1.5 pr-3">{(r.sol_pf || 0).toFixed(2)}</td>
+                                                <td className="py-1.5 pr-3">{profitCell(r.eth_profit)}</td>
+                                                <td className="py-1.5 pr-3">{profitCell(r.btc_profit)}</td>
+                                                <td className="py-1.5 pr-3">{profitCell(r.sol_profit)}</td>
+                                                <td className="py-1.5 pr-3 text-gray-400 text-xs whitespace-nowrap">{(r.first_found || r.run_date || '-').substring(0, 10)}</td>
+                                                <td className="py-1.5 text-gray-500 text-xs">{isExpanded ? '\u25B2' : '\u25BC'}</td>
+                                            </tr>
+                                            {isExpanded && renderExpandedDetails(r)}
+                                        </React.Fragment>
+                                    );
+                                })}
+                            </tbody>
+                        </table>
+                    </div>
+                )}
+            </Card>
+        </div>
+    );
+}
+
+// ─── Orchestrator Tab ───────────────────────────────────────────
+function OrchestratorTab({ onToast }) {
+    const [sweeps, setSweeps] = useState([]);
+    const [workers, setWorkers] = useState([]);
+    const [alwaysOnSweep, setAlwaysOnSweep] = useState(null);
+    const [showSettings, setShowSettings] = useState(false);
+    const [settingsForm, setSettingsForm] = useState({ time_budget_minutes: 60, target_workers: 4 });
+    const [savingSettings, setSavingSettings] = useState(false);
+    const [showCustomForm, setShowCustomForm] = useState(false);
+    const [customForm, setCustomForm] = useState({ name: '', time_budget_minutes: 60, num_workers: 2 });
+
+    useEffect(() => {
+        loadData();
+        const interval = setInterval(loadData, 5000);
+        return () => clearInterval(interval);
+    }, []);
+
+    async function loadData() {
+        try {
+            const [sweepsResp, workersResp, alwaysOnResp] = await Promise.all([
+                api.get('/api/sweeps'),
+                api.get('/api/workers'),
+                api.get('/api/sweeps/always-on').catch(() => null),
+            ]);
+            setSweeps(sweepsResp.sweeps || []);
+            setWorkers(workersResp.workers || []);
+            if (alwaysOnResp) {
+                setAlwaysOnSweep(alwaysOnResp);
+                setSettingsForm({
+                    time_budget_minutes: alwaysOnResp.params?.time_budget_minutes || 60,
+                    target_workers: alwaysOnResp.total_configs || 4,
+                });
+            }
+        } catch (e) {
+            console.error('Failed to load orchestrator data:', e);
+        }
+    }
+
+    async function saveAlwaysOnSettings() {
+        setSavingSettings(true);
+        try {
+            await api.patch('/api/sweeps/always-on', settingsForm);
+            onToast('Always-on sweep settings saved', 'success');
+            setShowSettings(false);
+            loadData();
+        } catch (e) {
+            onToast(e.message || 'Failed to save settings', 'error');
+        } finally {
+            setSavingSettings(false);
+        }
+    }
+
+    async function pauseAlwaysOn() {
+        try {
+            await api.patch(`/api/sweeps/${alwaysOnSweep.id}`, { status: 'paused' });
+            onToast('Smart Research paused', 'success');
+            loadData();
+        } catch (e) {
+            onToast(e.message || 'Failed to pause', 'error');
+        }
+    }
+
+    async function resumeAlwaysOn() {
+        try {
+            await api.patch(`/api/sweeps/${alwaysOnSweep.id}`, { status: 'running' });
+            onToast('Smart Research resumed', 'success');
+            loadData();
+        } catch (e) {
+            onToast(e.message || 'Failed to resume', 'error');
+        }
+    }
+
+    async function createCustomSweep() {
+        if (!customForm.name.trim()) {
+            onToast('Please enter a sweep name', 'error');
+            return;
+        }
+        try {
+            await api.post('/api/sweeps', {
+                name: customForm.name,
+                params: {
+                    time_budget_minutes: parseInt(customForm.time_budget_minutes),
+                    param_space: { h: [30, 110], x: [50, 70], smoothing: [true, false] }
+                },
+                num_workers: parseInt(customForm.num_workers),
+            });
+            onToast('Custom sweep created', 'success');
+            setShowCustomForm(false);
+            setCustomForm({ name: '', time_budget_minutes: 60, num_workers: 2 });
+            loadData();
+        } catch (e) {
+            onToast(e.message || 'Failed to create sweep', 'error');
+        }
+    }
+
+    async function updateSweepStatus(sweepId, status) {
+        try {
+            await api.patch(`/api/sweeps/${sweepId}`, { status });
+            onToast(`Sweep ${status}`, 'success');
+            loadData();
+        } catch (e) {
+            onToast(e.message || 'Failed to update sweep', 'error');
+        }
+    }
+
+    async function deleteSweep(sweepId) {
+        if (!confirm('Delete this sweep and all its jobs?')) return;
+        try {
+            await api.delete(`/api/sweeps/${sweepId}`);
+            onToast('Sweep deleted', 'success');
+            loadData();
+        } catch (e) {
+            onToast(e.message || 'Failed to delete sweep', 'error');
+        }
+    }
+
+    function getWorkerStatus(worker) {
+        const lastSeen = new Date(worker.last_seen);
+        const now = new Date();
+        const diffMinutes = (now - lastSeen) / 1000 / 60;
+        if (diffMinutes > 5) return { label: 'Offline', color: 'text-gray-500' };
+        if (worker.status === 'busy') return { label: 'Busy', color: 'text-yellow-400' };
+        return { label: 'Idle', color: 'text-green-400' };
+    }
+
+    function formatTimestamp(ts) {
+        if (!ts) return '-';
+        return new Date(ts).toLocaleString();
+    }
+
+    function getProgressPercent(sweep) {
+        if (!sweep.total_configs) return 0;
+        return Math.round((sweep.completed_configs / sweep.total_configs) * 100);
+    }
+
+    // Sweeps that are NOT the always-on perpetual one
+    const customSweeps = sweeps.filter(s => !s.perpetual);
+
+    const activeWorkers = workers.filter(w => {
+        const diff = (new Date() - new Date(w.last_seen)) / 1000 / 60;
+        return diff <= 5;
+    });
+    const busyWorkers = activeWorkers.filter(w => w.status === 'busy');
+
+    const alwaysOnStatus = alwaysOnSweep?.status || 'unknown';
+    const alwaysOnStatusColor = alwaysOnStatus === 'running' ? 'text-green-400'
+        : alwaysOnStatus === 'paused' ? 'text-yellow-400'
+        : 'text-gray-400';
+
+    return (
+        <div className="space-y-4">
+            {/* ── Always-On Smart Research Panel ── */}
+            <div className="bg-gray-800 rounded-lg p-4">
+                <div className="flex items-center justify-between mb-3">
+                    <div className="flex items-center gap-3">
+                        <div>
+                            <div className="text-xs text-gray-400 uppercase tracking-wider mb-0.5">Smart Research</div>
+                            <div className="flex items-center gap-2">
+                                <span className={`text-sm font-bold ${alwaysOnStatusColor}`}>
+                                    {alwaysOnStatus === 'running' ? '● RUNNING' : alwaysOnStatus === 'paused' ? '⏸ PAUSED' : '○ ' + alwaysOnStatus.toUpperCase()}
+                                </span>
+                                <span className="text-xs text-gray-500">Always-On · Perpetual</span>
+                            </div>
+                        </div>
+                    </div>
+                    <div className="flex items-center gap-2">
+                        <button onClick={() => setShowSettings(!showSettings)}
+                                className="text-xs bg-gray-700 hover:bg-gray-600 text-gray-300 py-1 px-3 rounded transition">
+                            ⚙ Settings
+                        </button>
+                        {alwaysOnSweep && alwaysOnStatus === 'running' && (
+                            <button onClick={pauseAlwaysOn}
+                                    className="text-xs bg-yellow-600 hover:bg-yellow-700 text-white py-1 px-3 rounded transition">
+                                Pause
+                            </button>
+                        )}
+                        {alwaysOnSweep && alwaysOnStatus === 'paused' && (
+                            <button onClick={resumeAlwaysOn}
+                                    className="text-xs bg-green-600 hover:bg-green-700 text-white py-1 px-3 rounded transition">
+                                Resume
+                            </button>
+                        )}
+                    </div>
+                </div>
+
+                {/* Stats row */}
+                <div className="grid grid-cols-4 gap-3 mb-3">
+                    <div className="bg-gray-700/60 rounded p-2 text-center">
+                        <div className="text-lg font-bold text-white">{activeWorkers.length}</div>
+                        <div className="text-xs text-gray-400">Online Workers</div>
+                    </div>
+                    <div className="bg-gray-700/60 rounded p-2 text-center">
+                        <div className="text-lg font-bold text-yellow-400">{busyWorkers.length}</div>
+                        <div className="text-xs text-gray-400">Busy</div>
+                    </div>
+                    <div className="bg-gray-700/60 rounded p-2 text-center">
+                        <div className="text-lg font-bold text-blue-400">
+                            {alwaysOnSweep?.job_stats?.pending || 0}
+                        </div>
+                        <div className="text-xs text-gray-400">Pending Jobs</div>
+                    </div>
+                    <div className="bg-gray-700/60 rounded p-2 text-center">
+                        <div className="text-lg font-bold text-green-400">
+                            {alwaysOnSweep?.completed_configs || 0}
+                        </div>
+                        <div className="text-xs text-gray-400">Cycles Done</div>
+                    </div>
+                </div>
+
+                {/* Config summary */}
+                <div className="text-xs text-gray-400 flex flex-wrap gap-4">
+                    <span>Budget/cycle: <span className="text-gray-200">{alwaysOnSweep?.params?.time_budget_minutes || 60} min</span></span>
+                    <span>Target workers: <span className="text-gray-200">{alwaysOnSweep?.total_configs || 4}</span></span>
+                    <span>Search: <span className="text-gray-200">Explore → Exploit → Refine</span></span>
+                    <span>Space: <span className="text-gray-200">h=[30,110], x=[50,70], smoothing=[on,off]</span></span>
+                </div>
+
+                {/* Settings panel */}
+                {showSettings && (
+                    <div className="mt-3 pt-3 border-t border-gray-700 space-y-3">
+                        <div className="grid grid-cols-2 gap-3">
+                            <div>
+                                <label className="text-xs text-gray-400 block mb-1">Time Budget per Cycle (minutes)</label>
+                                <input type="number" value={settingsForm.time_budget_minutes}
+                                       onChange={e => setSettingsForm({ ...settingsForm, time_budget_minutes: parseInt(e.target.value) || 60 })}
+                                       className="w-full bg-gray-700 text-white px-3 py-1.5 rounded text-sm"
+                                       min="5" max="1440" />
+                            </div>
+                            <div>
+                                <label className="text-xs text-gray-400 block mb-1">Target Workers</label>
+                                <input type="number" value={settingsForm.target_workers}
+                                       onChange={e => setSettingsForm({ ...settingsForm, target_workers: parseInt(e.target.value) || 1 })}
+                                       className="w-full bg-gray-700 text-white px-3 py-1.5 rounded text-sm"
+                                       min="1" max="20" />
+                            </div>
+                        </div>
+                        <div className="flex gap-2">
+                            <button onClick={saveAlwaysOnSettings} disabled={savingSettings}
+                                    className="bg-blue-600 hover:bg-blue-700 disabled:opacity-50 text-white text-xs font-semibold py-1.5 px-4 rounded transition">
+                                {savingSettings ? 'Saving…' : 'Save Settings'}
+                            </button>
+                            <button onClick={() => setShowSettings(false)}
+                                    className="bg-gray-600 hover:bg-gray-700 text-white text-xs py-1.5 px-4 rounded transition">
+                                Cancel
+                            </button>
+                        </div>
+                    </div>
+                )}
+            </div>
+
+            {/* ── Custom Sweeps (collapsible) ── */}
+            <div className="bg-gray-800 rounded-lg p-4">
+                <div className="flex items-center justify-between">
+                    <div className="text-xs text-gray-400 uppercase tracking-wider">Custom Sweeps</div>
+                    <button onClick={() => setShowCustomForm(!showCustomForm)}
+                            className="text-xs bg-blue-600 hover:bg-blue-700 text-white font-semibold py-1 px-3 rounded transition">
+                        + New Custom Sweep
+                    </button>
+                </div>
+
+                {showCustomForm && (
+                    <div className="mt-3 space-y-3">
+                        <div>
+                            <label className="text-xs text-gray-400 block mb-1">Sweep Name</label>
+                            <input type="text" value={customForm.name}
+                                   onChange={e => setCustomForm({ ...customForm, name: e.target.value })}
+                                   className="w-full bg-gray-700 text-white px-3 py-1.5 rounded text-sm"
+                                   placeholder="e.g. Experiment A" />
+                        </div>
+                        <div className="grid grid-cols-2 gap-3">
+                            <div>
+                                <label className="text-xs text-gray-400 block mb-1">Time Budget (minutes)</label>
+                                <input type="number" value={customForm.time_budget_minutes}
+                                       onChange={e => setCustomForm({ ...customForm, time_budget_minutes: e.target.value })}
+                                       className="w-full bg-gray-700 text-white px-3 py-1.5 rounded text-sm" min="1" />
+                            </div>
+                            <div>
+                                <label className="text-xs text-gray-400 block mb-1">Number of Workers</label>
+                                <input type="number" value={customForm.num_workers}
+                                       onChange={e => setCustomForm({ ...customForm, num_workers: e.target.value })}
+                                       className="w-full bg-gray-700 text-white px-3 py-1.5 rounded text-sm" min="1" max="10" />
+                            </div>
+                        </div>
+                        <div className="flex gap-2">
+                            <button onClick={createCustomSweep}
+                                    className="bg-green-600 hover:bg-green-700 text-white text-xs font-semibold py-1.5 px-4 rounded transition">
+                                Create
+                            </button>
+                            <button onClick={() => setShowCustomForm(false)}
+                                    className="bg-gray-600 hover:bg-gray-700 text-white text-xs py-1.5 px-4 rounded transition">
+                                Cancel
+                            </button>
+                        </div>
+                    </div>
+                )}
+
+                {customSweeps.length === 0 ? (
+                    <div className="text-gray-500 text-sm mt-3">No custom sweeps.</div>
+                ) : (
+                    <div className="space-y-3 mt-3">
+                        {customSweeps.map(sweep => {
+                            const progress = getProgressPercent(sweep);
+                            const jobStats = sweep.job_stats || {};
+                            const statusColor = sweep.status === 'running' ? 'text-green-400'
+                                : sweep.status === 'completed' ? 'text-blue-400'
+                                : sweep.status === 'paused' ? 'text-yellow-400'
+                                : 'text-gray-400';
+
+                            return (
+                                <div key={sweep.id} className="bg-gray-700/50 rounded p-3">
+                                    <div className="flex justify-between items-start mb-2">
+                                        <div>
+                                            <div className="font-semibold text-white">{sweep.name}</div>
+                                            <div className="text-xs text-gray-400 mt-1">Created: {formatTimestamp(sweep.created_at)}</div>
+                                        </div>
+                                        <div className={`text-sm font-semibold ${statusColor}`}>{sweep.status.toUpperCase()}</div>
+                                    </div>
+                                    <div className="mb-2">
+                                        <div className="flex justify-between text-xs text-gray-400 mb-1">
+                                            <span>Progress: {sweep.completed_configs} / {sweep.total_configs}</span>
+                                            <span>{progress}%</span>
+                                        </div>
+                                        <div className="w-full bg-gray-600 rounded-full h-2">
+                                            <div className="bg-blue-500 h-2 rounded-full transition-all" style={{ width: `${progress}%` }}></div>
+                                        </div>
+                                    </div>
+                                    <div className="flex gap-4 text-xs text-gray-400 mb-3">
+                                        <span>Pending: {jobStats.pending || 0}</span>
+                                        <span>Claimed: {jobStats.claimed || 0}</span>
+                                        <span>Completed: {jobStats.completed || 0}</span>
+                                        <span>Failed: {jobStats.failed || 0}</span>
+                                    </div>
+                                    <div className="flex gap-2">
+                                        {sweep.status === 'running' && (
+                                            <button onClick={() => updateSweepStatus(sweep.id, 'paused')}
+                                                    className="bg-yellow-600 hover:bg-yellow-700 text-white text-xs py-1 px-3 rounded transition">
+                                                Pause
+                                            </button>
+                                        )}
+                                        {sweep.status === 'paused' && (
+                                            <button onClick={() => updateSweepStatus(sweep.id, 'running')}
+                                                    className="bg-green-600 hover:bg-green-700 text-white text-xs py-1 px-3 rounded transition">
+                                                Resume
+                                            </button>
+                                        )}
+                                        {sweep.status !== 'completed' && (
+                                            <button onClick={() => updateSweepStatus(sweep.id, 'cancelled')}
+                                                    className="bg-red-600 hover:bg-red-700 text-white text-xs py-1 px-3 rounded transition">
+                                                Cancel
+                                            </button>
+                                        )}
+                                        <button onClick={() => deleteSweep(sweep.id)}
+                                                className="bg-gray-600 hover:bg-gray-700 text-white text-xs py-1 px-3 rounded transition">
+                                            Delete
+                                        </button>
+                                    </div>
+                                </div>
+                            );
+                        })}
+                    </div>
+                )}
+            </div>
+            
+            <Card title="WORKERS">
+                {workers.length === 0 ? (
+                    <div className="text-gray-500 text-sm">No workers connected. Start a worker with push-to-server.py</div>
+                ) : (
+                    <div className="overflow-x-auto">
+                        <table className="w-full text-sm">
+                            <thead>
+                                <tr className="text-left text-gray-400 border-b border-gray-700">
+                                    <th className="pb-2 pr-3">Name</th>
+                                    <th className="pb-2 pr-3">Hostname</th>
+                                    <th className="pb-2 pr-3">Status</th>
+                                    <th className="pb-2 pr-3">Last Seen</th>
+                                    <th className="pb-2 pr-3">CPU Cores</th>
+                                </tr>
+                            </thead>
+                            <tbody>
+                                {workers.map(worker => {
+                                    const status = getWorkerStatus(worker);
+                                    const machineInfo = worker.machine_info || {};
+                                    
+                                    return (
+                                        <tr key={worker.id} className="border-b border-gray-800">
+                                            <td className="py-2 pr-3 font-mono text-blue-300">{worker.name}</td>
+                                            <td className="py-2 pr-3 text-gray-300">{worker.hostname}</td>
+                                            <td className={`py-2 pr-3 font-semibold ${status.color}`}>{status.label}</td>
+                                            <td className="py-2 pr-3 text-gray-400 text-xs">
+                                                {formatTimestamp(worker.last_seen)}
+                                            </td>
+                                            <td className="py-2 pr-3 text-gray-400">{machineInfo.cpu_count || '-'}</td>
+                                        </tr>
+                                    );
+                                })}
+                            </tbody>
+                        </table>
+                    </div>
+                )}
+            </Card>
+        </div>
+    );
+}
+
+// ─── App ────────────────────────────────────────────────────────
+function App() {
+    const [tab, setTab] = useState('dashboard');
+    const [status, setStatus] = useState({});
+    const [trades, setTrades] = useState([]);
+    const [equity, setEquity] = useState([]);
+    const [toast, setToast] = useState(null);
+
+    useEffect(() => {
+        const loadStatus = () => api.get('/api/status').then(setStatus).catch(() => {});
+        const loadTrades = () => {
+            api.get('/api/trades').then(d => setTrades(d.trades || [])).catch(() => {});
+            api.get('/api/equity').then(d => setEquity(d.equity || [])).catch(() => {});
+        };
+        loadStatus(); loadTrades();
+        const s1 = setInterval(loadStatus, 10000);
+        const s2 = setInterval(loadTrades, 30000);
+        return () => { clearInterval(s1); clearInterval(s2); };
+    }, []);
+
+    async function emergencyClose() {
+        if (!confirm('Close position NOW?')) return;
+        try {
+            await api.post('/api/emergency/close');
+            setToast({ message: 'Emergency close signal sent', type: 'success' });
+        } catch (e) { setToast({ message: e.message, type: 'error' }); }
+    }
+
+    async function resetKillSwitch() {
+        if (!confirm('Reset kill switch? This will clear consecutive losses and resume trading.')) return;
+        try {
+            await api.post('/api/killswitch/reset');
+            setToast({ message: 'Kill switch reset — trading resumed', type: 'success' });
+            api.get('/api/status').then(setStatus);
+        } catch (e) { setToast({ message: e.message, type: 'error' }); }
+    }
+
+    async function togglePause() {
+        const url = status.trading_paused ? '/api/emergency/resume' : '/api/emergency/pause';
+        try {
+            await api.post(url);
+            setToast({ message: status.trading_paused ? 'Trading resumed' : 'Trading paused', type: 'success' });
+            api.get('/api/status').then(setStatus);
+        } catch (e) { setToast({ message: e.message, type: 'error' }); }
+    }
+
+    const tabs = [
+        { id: 'dashboard', label: 'Dashboard' },
+        { id: 'settings', label: 'Settings' },
+        { id: 'logs', label: 'Logs' },
+        { id: 'signals', label: 'Signals' },
+        { id: 'autoresearch', label: 'AutoResearch' },
+        { id: 'orchestrator', label: 'Orchestrator' },
+        { id: 'leaderboard', label: 'Leaderboard' },
+    ];
+
+    return (
+        <div className="max-w-6xl mx-auto px-4 py-6">
+            {toast && <Toast message={toast.message} type={toast.type} onClose={() => setToast(null)} />}
+
+            <div className="flex items-center justify-between mb-6">
+                <h1 className="text-xl font-bold">Trading Bot Dashboard</h1>
+                <div className="flex gap-1 bg-gray-800 rounded-lg p-1">
+                    {tabs.map(t => (
+                        <button key={t.id} onClick={() => setTab(t.id)}
+                                className={`px-4 py-1.5 rounded text-sm font-medium transition ${
+                                    tab === t.id ? 'bg-blue-600 text-white' : 'text-gray-400 hover:text-white'
+                                }`}>
+                            {t.label}
+                        </button>
+                    ))}
+                </div>
+            </div>
+
+            {tab === 'dashboard' && (
+                <>
+                    <DashboardTab status={status} trades={trades} equity={equity} />
+                    <div className="flex gap-3 mt-4">
+                        <button onClick={emergencyClose}
+                                className="bg-red-600 hover:bg-red-700 text-white font-semibold py-2 px-6 rounded transition">
+                            Close Position NOW
+                        </button>
+                        <button onClick={togglePause}
+                                className={`font-semibold py-2 px-6 rounded transition ${
+                                    status.trading_paused
+                                        ? 'bg-green-600 hover:bg-green-700 text-white'
+                                        : 'bg-yellow-600 hover:bg-yellow-700 text-white'
+                                }`}>
+                            {status.trading_paused ? 'Resume Trading' : 'Pause Trading'}
+                        </button>
+                        {status.kill_switch_paused && (
+                            <button onClick={resetKillSwitch}
+                                    className="bg-orange-600 hover:bg-orange-700 text-white font-semibold py-2 px-6 rounded transition">
+                                Reset Kill Switch
+                            </button>
+                        )}
+                    </div>
+                </>
+            )}
+            {tab === 'settings' && <SettingsTab onToast={(msg, type) => setToast({ message: msg, type })} />}
+            {tab === 'logs' && <LogsTab />}
+            {tab === 'signals' && <SignalsTab />}
+            {tab === 'autoresearch' && <AutoResearchTab onToast={(msg, type) => setToast({ message: msg, type })} />}
+            {tab === 'orchestrator' && <OrchestratorTab onToast={(msg, type) => setToast({ message: msg, type })} />}
+            {tab === 'leaderboard' && <LeaderboardTab onToast={(msg, type) => setToast({ message: msg, type })} />}
+        </div>
+    );
+}
+
+ReactDOM.createRoot(document.getElementById('root')).render(<App />);
+</script>
+</body>
+</html>
